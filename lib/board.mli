@@ -25,8 +25,10 @@ end
 
 val create : Dimensions.t -> t
 val click : t -> Coordinates.t -> Click_type.t -> unit
+val surrounding_mines : t -> int array array
 
 module For_testing : sig
   val mine_to_string : t -> string
   val status_to_string : t -> string
+  val surrounding_mines_to_string : t -> string
 end
