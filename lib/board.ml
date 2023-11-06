@@ -2,8 +2,8 @@ open! Core
 
 module Click_type = struct
   type t =
-    | Explore
-    | Flag
+    | Left
+    | Right
 end
 
 module Click_status = struct
@@ -13,7 +13,7 @@ module Click_status = struct
     | Flagged
   [@@deriving sexp]
 
-  let flag = function
+  (* let flag = function
     | Flagged -> Clickable
     | Clickable -> Flagged
     | Revealed -> Revealed
@@ -22,12 +22,7 @@ module Click_status = struct
   let explore = function
     | (Flagged | Revealed) as t -> t
     | Clickable -> Revealed
-  ;;
-
-  let click t = function
-    | Click_type.Flag -> flag t
-    | Explore -> explore t
-  ;;
+  ;; *)
 end
 
 module Cell : sig
@@ -37,7 +32,7 @@ module Cell : sig
   val click_status : t -> Click_status.t
   val default_mine : t
   val default_empty : t
-  val click : t -> Click_type.t -> t
+  val click : t -> Click_status.t -> t
 end = struct
   type t =
     { is_mine : bool
@@ -48,10 +43,15 @@ end = struct
   let default = Fields.create ~click_status:Click_status.Clickable
   let default_mine = default ~is_mine:true
   let default_empty = default ~is_mine:false
-
-  let click t click_type =
-    { t with click_status = Click_status.click (click_status t) click_type }
-  ;;
+  let click t new_click_status = { t with click_status = new_click_status }
+  (* let click t click_type =
+    let click_status =
+      match click_type with
+      | Click_type.Right  | -> Click_status.flag t.click_status
+      | Left -> Click_status.explore t.click_status
+    in
+    { t with click_status }
+  ;; *)
 end
 
 module Dimensions = struct
@@ -71,16 +71,39 @@ end
 
 type t =
   { cells : Cell.t array array
-  ; width : int
-  ; height : int
+  ; dimensions : Dimensions.t
+  ; surrounding_mines : int array array
   }
 
-let check_in_bounds { cells = _; width; height } { Coordinates.x; y } =
+let check_in_bounds { Dimensions.width; height; mines = _ } { Coordinates.x; y } =
   x >= 0 && y >= 0 && x < width && y < height
 ;;
 
-let create { Dimensions.width; height; mines } =
+let matrix_map t ~f = Array.map t ~f:(Array.map ~f)
+
+let mapi_cells cells ~f =
+  Array.mapi cells ~f:(fun x -> Array.mapi ~f:(fun y -> f { Coordinates.x; y }))
+;;
+
+let neighbouring_coords d { Coordinates.x; y } =
+  let cell_breadth = List.range ~stop:`inclusive (-1) 1 in
+  let neighbours = List.cartesian_product cell_breadth cell_breadth in
+  List.map neighbours ~f:(fun (i, j) -> { Coordinates.x = x + i; y = y + j })
+  |> List.filter ~f:(check_in_bounds d)
+;;
+
+let surrounding_mines d cells =
+  mapi_cells cells ~f:(fun coord (_ : Cell.t) ->
+      let neighbours = neighbouring_coords d coord in
+      List.sum
+        (module Int)
+        neighbours
+        ~f:(fun { Coordinates.x; y } -> cells.(x).(y) |> Cell.is_mine |> Bool.to_int))
+;;
+
+let create ({ Dimensions.width; height; mines } as dimensions) =
   let cells = Array.make_matrix ~dimx:width ~dimy:height Cell.default_empty in
+  (* TODO(madhav): Check if this is valid *)
   let () =
     let random_coords =
       List.cartesian_product (List.init width ~f:Fn.id) (List.init height ~f:Fn.id)
@@ -90,42 +113,42 @@ let create { Dimensions.width; height; mines } =
     List.take random_coords mines
     |> List.iter ~f:(fun (x, y) -> cells.(x).(y) <- Cell.default_mine)
   in
-  { cells; width; height }
+  let surrounding_mines = surrounding_mines dimensions cells in
+  { cells; dimensions; surrounding_mines }
 ;;
 
-let matrix_map t ~f = Array.map t ~f:(Array.map ~f)
+let rec click t ({ Coordinates.x; y } as coordinates) click_type =
+  let previous_cell = t.cells.(x).(y) in
+  match click_type, Cell.click_status previous_cell with
+  | Click_type.Left, Flagged -> ()
+  | Right, Flagged -> t.cells.(x).(y) <- Cell.click previous_cell Clickable
+  | Left, Revealed -> chord t coordinates
+  | Right, Revealed -> ()
+  | Left, Clickable -> explore t coordinates
+  | Right, Clickable -> t.cells.(x).(y) <- Cell.click previous_cell Flagged
 
-let mapi_cells t ~f =
-  Array.mapi t.cells ~f:(fun x -> Array.mapi ~f:(fun y -> f { Coordinates.x; y }))
-;;
+and chord ({ cells; dimensions; surrounding_mines } as t) ({ Coordinates.x; y } as c) =
+  let neighbours = neighbouring_coords dimensions c in
+  let non_flagged_neighbours =
+    neighbours
+    |> List.filter ~f:(fun { Coordinates.x; y } ->
+           match Cell.click_status cells.(x).(y) with
+           | Flagged -> false
+           | _ -> true)
+  in
+  let num_flagged_mines = List.length neighbours - List.length non_flagged_neighbours in
+  if num_flagged_mines = surrounding_mines.(x).(y)
+  then List.iter non_flagged_neighbours ~f:(fun c -> click t c Click_type.Right)
+  else ()
 
-(* let mapi_cells t ~f = Array.map t.cells ~f *)
-
-let neighbouring_coords t { Coordinates.x; y } =
-  let cell_breadth = List.range ~stop:`inclusive (-1) 1 in
-  let neighbours = List.cartesian_product cell_breadth cell_breadth in
-  List.map neighbours ~f:(fun (i, j) -> { Coordinates.x = x + i; y = y + j })
-  |> List.filter ~f:(check_in_bounds t)
-;;
-
-let surrounding_mines t =
-  mapi_cells t ~f:(fun coords (_ : Cell.t) ->
-      let neighbours = neighbouring_coords t coords in
-      List.sum
-        (module Int)
-        neighbours
-        ~f:(fun { Coordinates.x; y } -> t.cells.(x).(y) |> Cell.is_mine |> Bool.to_int))
-;;
-
-let _expand _cells _x _y = ()
-
-let click { cells; width = _; height = _ } { Coordinates.x; y } click_type =
-  let cell = cells.(x).(y) in
-  let resulting_cell = Cell.click cell click_type in
-  cells.(x).(y) <- resulting_cell;
-  match Cell.click_status resulting_cell with
-  | Clickable | Flagged -> ()
-  | Revealed -> _expand cells x y
+and explore ({ cells; dimensions; surrounding_mines } as t) ({ Coordinates.x; y } as c) =
+  let current_cell = cells.(x).(y) in
+  if surrounding_mines.(x).(y) = 0
+  then
+    neighbouring_coords dimensions c |> List.iter ~f:(fun c -> click t c Click_type.Right)
+  else if Cell.is_mine current_cell
+  then ()
+  else t.cells.(x).(y) <- Cell.click current_cell Revealed
 ;;
 
 module For_testing = struct
@@ -153,15 +176,15 @@ module For_testing = struct
     |> String.concat ~sep:"\n"
   ;;
 
-  let mine_to_string { cells; width = _; height = _ } =
+  let mine_to_string { cells; dimensions = _; surrounding_mines = _ } =
     board_to_string cells ~cell_to_string:Cell.mine_char_of_t
   ;;
 
-  let status_to_string { cells; width = _; height = _ } =
+  let status_to_string { cells; dimensions = _; surrounding_mines = _ } =
     board_to_string cells ~cell_to_string:Cell.status_char_of_t
   ;;
 
   let surrounding_mines_to_string t =
-    board_to_string (surrounding_mines t) ~cell_to_string:(fun c -> Int.to_string c)
+    board_to_string t.surrounding_mines ~cell_to_string:(fun c -> Int.to_string c)
   ;;
 end
